@@ -1,0 +1,22 @@
+experiment:
+  budget: 20
+  seeds: 10
+  initial_samples: 5
+  n_acquire: 1
+
+model:
+  family: lodernn
+  dropout_prob: 0.1
+
+acquisition:
+  pool_size: 20
+  mc_samples: 20
+
+simulation:
+  # Fix Alpha (Inf), Beta (Rec), Gamma (Resus)
+  # Only 'i' (Intervention Time) will vary
+  # High Infection Regime
+  fixed_params: [0.9, 0.1, 0.1]
+  
+visualization:
+  plot_uncertainty_space: true

@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: neurips_ics4csm
+Version: 1.0.0
+Summary: Code for NeurIPS 2024 paper on `Interventionally consistent surrogates for complex simulation models'.
+Home-page: https://github.com/joelnmdyer/neurips_ics4csm
+Author: Joel Dyer
+Author-email: joel.dyer@cs.ox.ac.uk
+License: MIT License
+License-File: LICENSE
+Requires-Dist: numpy==1.24.4
+Requires-Dist: torch==2.0.0
+Requires-Dist: tqdm==4.65.0
+Dynamic: author
+Dynamic: author-email
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary

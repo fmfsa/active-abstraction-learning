@@ -1,0 +1,18 @@
+name: active_abstraction
+channels:
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch>=2.0.0
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - pyyaml
+  - tqdm
+  - numpy
+  - numba
+  - pip
+  - pip:
+    - -e neurips_ics4csm_original
+    - -e .
