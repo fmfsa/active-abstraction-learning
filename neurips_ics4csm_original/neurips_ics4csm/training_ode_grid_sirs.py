@@ -31,6 +31,8 @@ def produce_loss(omega, calib, states, aggs, ths, i_s, model, loss_fn):
         # loss_fn should take in micromodel draw x, macro ode output y, and network that maps from y to emission distribution parameters
         loss += loss_fn(x, y, calib)
 
+    if states.shape[0] == 0:
+        return torch.tensor(0.0)
     return loss / states.shape[0]
 
 
@@ -102,6 +104,7 @@ def train_epi(omega, calib, abm_states, abm_agg_ts, abm_thi,
                 total_epoch_loss += loss.item()
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(list(omega.parameters()) + list(calib.parameters()), 1.0)
                 optimiser.step()
 
                 idx = end_idx

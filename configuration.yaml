@@ -1,11 +1,16 @@
 experiment:
   budget: 20
-  seeds: 10
+  seeds: 3
   initial_samples: 5
   n_acquire: 1
+  epochs: 100
+  initial_condition:
+    type: fixed
+    value: 0.01 # Start with 1% infected
+  families: [lodernn]
+  methods: [random, uncertainty_sampling, bald]
 
 model:
-  family: lodernn
   dropout_prob: 0.1
 
 acquisition:
@@ -13,10 +18,4 @@ acquisition:
   mc_samples: 20
 
 simulation:
-  # Fix Alpha (Inf), Beta (Rec), Gamma (Resus)
-  # Only 'i' (Intervention Time) will vary
-  # High Infection Regime
-  fixed_params: [0.9, 0.1, 0.1]
-  
-visualization:
-  plot_uncertainty_space: true
+

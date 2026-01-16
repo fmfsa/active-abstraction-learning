@@ -22,7 +22,7 @@ def main():
     
     # AL args
     parser.add_argument("--acquisition_method", type=str, default="uncertainty_sampling", 
-                        choices=["random", "uncertainty_sampling", "disagreement", "entropy"], 
+                        choices=["random", "uncertainty_sampling", "disagreement", "entropy", "bald"], 
                         help="Acquisition function")
     parser.add_argument("--pool_size", type=int, default=100, help="Size of In Silico Screening pool")
     parser.add_argument("--mc_samples", type=int, default=10, help="Number of MC Dropout samples for scoring")
@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--dirname", type=str, default=f"results_aal_{int(time.time())}", help="Output directory")
     parser.add_argument("--fixed_params", type=str, default=None, help="Fixed parameters as comma-separated string: alpha,beta,gamma")
+    parser.add_argument("--initial_condition_value", type=float, default=0.01, help="Fixed initial infection rate (e.g. 0.01)")
 
     args = parser.parse_args()
     
@@ -74,17 +75,37 @@ def main():
         results["dataset_size"].append(ds_size)
         results["test_nll"].append(nll)
 
+    # Helper to save checkpoint
+    def save_checkpoint(ds_size):
+        if hasattr(learner, 'obs_omega'):
+             torch.save({
+                'omega': learner.obs_omega.state_dict(),
+                'rnn': learner.obs_rnn_net.state_dict() if hasattr(learner, 'obs_rnn_net') else None
+             }, os.path.join(args.dirname, f"model_size_{ds_size}.pt"))
+             print(f"Saved checkpoint: model_size_{ds_size}.pt")
+
     # 1. Initialization
     print(">>> Phase 1: Initialization")
     learner.collect_initial_data(n_samples=args.initial_samples)
     learner._train_surrogate() # Train on initial data
     log_step(0)
     
+    # Save Initial Checkpoint (Size 1)
+    if len(learner.states) in [1, 3, 5, 10, 15]:
+        save_checkpoint(len(learner.states))
+    
     # 2. AL Loop
     print(">>> Phase 2: Active Loop")
+    target_sizes = [1, 3, 5, 10, 15]
+    
     for step in range(args.budget):
         print(f"\n--- AL Step {step+1}/{args.budget} ---")
         learner.step(n_acquire=args.n_acquire)
+        ds_size = len(learner.states)
+        
+        if ds_size in target_sizes:
+            save_checkpoint(ds_size)
+            
         log_step(step + 1)
         
     print("\n>>> Experiment Complete.")

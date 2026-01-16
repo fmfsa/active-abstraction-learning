@@ -7,6 +7,13 @@ from active_abstraction.models import generate_dropout_networks, MCDropoutWrappe
 from active_abstraction.acquisition import AcquisitionManager
 
 class ActiveLearner:
+    """
+    Implements the Active Learning extension of Algorithm 1 from "Interventionally Consistent Surrogates".
+    
+    Algorithm 1 Mapping:
+    - Loop 1 (Data Collection): Replaced by 'step()' which actively selects interventions i(r) instead of random sampling.
+    - Loop 2 (Training): implemented by '_train_surrogate()' calling 'train_epi'.
+    """
     def __init__(self, 
                  args, 
                  device='cpu'):
@@ -128,13 +135,13 @@ class ActiveLearner:
             params = cand[:3] # alpha, beta, gamma
             interv_time = int(cand[3].item())
             
-            # i0 is random dist in original collect_data?
-            # "Draw initial proportion of infected individuals from Uniform(0,1)" in utils.collect_data
-            # We should probably sample i0 randomly here too, OR include it in the candidate?
-            # The prompt says "intervention i*". Usually intervention refers to the do-operator parameters.
-            # Initial state might be part of the context or fixed.
-            # In utils.collect_data, i0 is random.
-            i0 = torch.rand(1)
+            # Parse initial condition from config or default to 0.01
+            if hasattr(self.args, 'initial_condition_value') and self.args.initial_condition_value is not None:
+                 i0 = torch.tensor([self.args.initial_condition_value])
+            elif hasattr(self.args, 'config') and 'experiment' in self.args.config: # Fallback to looking in raw config dict if available
+                 i0 = torch.tensor([self.args.config['experiment'].get('initial_condition', {}).get('value', 0.01)])
+            else:
+                 i0 = torch.tensor([0.01]) # Default fixed small outbreak
             
             # Run wrapper
             init_state, x = run_spatial_intervention(params, interv_time, i0, self.T, self.L)
@@ -144,30 +151,20 @@ class ActiveLearner:
             self.thi.append(cand)
             
     def _create_predictive_model(self):
-        # Returns a vector-to-vector callable model for AcquisitionManager
-        # Input: (Batch, 4) -> [alpha, beta, gamma, int_time]
-        # Output: (Batch, feature_dim) -> e.g. logits of the emission
+        """
+        Creates a callable wrapper model for the AcquisitionManager.
         
-        # We need to handle the fact that forward pass requires y0 (initial state).
-        # But we don't know y0 for the candidates yet (it's randomly sampled during query).
-        # HOWEVER, the 'epistemic uncertainty' we care about is in the learned MAP `omega` (and RNN).
-        # If we fix a 'canonical' y0, we can measure uncertainty in the dynamics.
-        # Or we can integrate over y0. 
-        # For simplicity, let's fix a canonical y0 = [0.99, 0.01, 0.0].
+        The wrapper takes a batch of candidate parameters [alpha, beta, gamma, intervention_time],
+        runs the full surrogate forward pass (Omega -> ODE -> RNN), and returns the flattened
+        emission parameters (e.g., predicted logits). 
         
+        We use a canonical initial state (y0) to estimate epistemic uncertainty in the dynamics map (Omega).
+        """
         canonical_y0 = torch.tensor([0.99, 0.01, 0.0]).double()
         t_seq = torch.linspace(0, self.T, self.T+1)
         
-        # Ensure we are using the current best weights
         omega = self.obs_omega
-        rnn_net = self.obs_rnn_net
-        
-        # Determine model structure (ODE or RNN)
-        if self.args.family == 'lrnn':
-            # This is complex because lrnn creates a new model per time step or something? 
-            # create_instantiate_sirsrnn(obs_rnn_net) returns a function that returns SIRSRNN.
-            # SIRSRNN takes (y0, params).
-            pass 
+        rnn_net = self.obs_rnn_net 
         
         # Let's define the forward pass callable
         class PredictiveWrapper(torch.nn.Module):
@@ -254,7 +251,7 @@ class ActiveLearner:
         # Create Optimiser
         optimiser = torch.optim.Adam(
             list(self.obs_rnn_net.parameters()) + list(self.obs_omega.parameters()),
-            lr=1e-2
+            lr=1e-3
         )
         
         # Call train_epi
@@ -349,4 +346,3 @@ class ActiveLearner:
                 self.negative_log_likelihood
             )
         return loss.item()
-

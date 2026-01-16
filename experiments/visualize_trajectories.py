@@ -18,109 +18,122 @@ def load_config():
     with open("configuration.yaml", "r") as f:
         return yaml.safe_load(f)
 
-def load_surrogate(experiment_dir, config):
+def load_surrogate(experiment_dir, family, config):
     # Initialize Model components
-    # We must use generate_dropout_networks because the saved model contains DropoutMLP/RNN
     from active_abstraction.models import generate_dropout_networks
-    rnn_net, omega = generate_dropout_networks(kind=config['model']['family'], seed=42, dropout_prob=config['model']['dropout_prob'])
+    rnn_net, omega = generate_dropout_networks(kind=family, seed=42, dropout_prob=config['model']['dropout_prob'])
     
     # Load Weights
-    # We look for the best run in the experiment dir (e.g. results_experiment_final/uncertainty_sampling_seed0)
-    # The experiment_dir passed might be the base dir. Let's find a valid run.
+    # Look for {family}_uncertainty_sampling_seed0
+    # Fallback to any seed if seed0 missing, or random/other method if needed.
     
-    model_path = None
-    if os.path.exists(os.path.join(experiment_dir, "final_model.pt")):
-         model_path = os.path.join(experiment_dir, "final_model.pt")
-    else:
-        # Search for a seed subdir
+    candidate_dir = os.path.join(experiment_dir, f"{family}_uncertainty_sampling_seed0")
+    model_path = os.path.join(candidate_dir, "final_model.pt")
+    
+    if not os.path.exists(model_path):
+        # Try finding ANY valid model for this family
+        print(f"Warning: {model_path} not found. Searching for any {family} model...")
         for root, dirs, files in os.walk(experiment_dir):
-            if "final_model.pt" in files:
+            if f"{family}_" in root and "final_model.pt" in files:
                 model_path = os.path.join(root, "final_model.pt")
                 break
     
-    if model_path:
-        print(f"Loading trained model from {model_path}")
+    if os.path.exists(model_path):
+        print(f"Loading trained {family} model from {model_path}")
         state = torch.load(model_path)
         omega.load_state_dict(state['omega'])
         if state['rnn'] is not None:
             rnn_net.load_state_dict(state['rnn'])
     else:
-        print("WARNING: No 'final_model.pt' found. Using untrained model!")
+        print(f"WARNING: No trained model found for {family}. Using initialized weights!")
     
     T = 50
     model = instantiate_model(torch.linspace(0, T, T+1))
     
     return omega, rnn_net, model
 
-def plot_trajectory_grid(omega, rnn_net, model, scenarios, config):
-    n_scenarios = len(scenarios)
-    cols = 3
-    rows = (n_scenarios + cols - 1) // cols
+def plot_trajectory_grid(families, scenarios, experiment_dir, config):
+    rows = len(families)
+    cols = len(scenarios)
     
-    fig, axes = plt.subplots(rows, cols, figsize=(18, 5 * rows))
-    axes = axes.flatten()
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), sharex=True, sharey=True)
+    if rows == 1: axes = axes.reshape(1, -1)
+    if cols == 1: axes = axes.reshape(-1, 1)
     
     T = 50
     L = 50 
     N = L**2
     from neurips_ics4csm.utils import create_instantiate_emission
-    instantiate_emission = create_instantiate_emission(N, config['model']['family'])
+    
     t_steps = np.arange(T+1)
     labels = ['Susceptible', 'Infected', 'Recovered']
     colors = ['blue', 'red', 'green']
     
-    # Enable dropout
-    omega.train() 
-    rnn_net.train()
-    
-    for idx, (name, params, intervention) in enumerate(scenarios):
-        ax = axes[idx]
-        print(f"Plotting scenario: {name}...")
+    for i, family in enumerate(families):
+        omega, rnn_net, model = load_surrogate(experiment_dir, family, config)
+        instantiate_emission = create_instantiate_emission(N, family)
         
-        alpha, beta, gamma = params
+        # Enable dropout
+        omega.train() 
+        rnn_net.train()
         
-        # 1. Ground Truth
-        init_state, x_gt = run_spatial_intervention(torch.tensor([alpha, beta, gamma]), intervention, 0.1, T, L)
-        
-        # 2. Surrogate
-        n_mc = 20
-        predictions = []
-        y0 = torch.tensor([0.9, 0.1, 0.0]).double()
-        
-        for _ in range(n_mc):
-            e_dists = generate_dists(instantiate_emission, omega, torch.tensor([alpha, beta, gamma]), model, y0, intervention, rnn_net)
-            traj = torch.stack([d.mean for d in e_dists]) / N 
-            predictions.append(traj.detach())
+        for j, (name, params, intervention) in enumerate(scenarios):
+            ax = axes[i, j]
+            if i == 0:
+                print(f"Plotting Ground Truth for scenario: {name}...")
             
-        predictions = torch.stack(predictions)
-        mean_pred = predictions.mean(dim=0)
-        std_pred = predictions.std(dim=0)
-        
-        # 3. Plot
-        for dim in range(3):
-            # GT
-            ax.plot(t_steps, x_gt[:, dim], '--', color=colors[dim], alpha=0.6)
-            # Surrogate
-            ax.plot(t_steps, mean_pred[:, dim], '-', color=colors[dim], label=f'{labels[dim]}' if idx==0 else "")
-            # Uncertainty
-            lower = mean_pred[:, dim] - 2 * std_pred[:, dim]
-            upper = mean_pred[:, dim] + 2 * std_pred[:, dim]
-            ax.fill_between(t_steps, lower, upper, color=colors[dim], alpha=0.2)
+            alpha, beta, gamma = params
             
-        ax.set_title(f"{name}\n(i={intervention}, $\\alpha$={alpha}, $\\beta$={beta})")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Fraction")
-        ax.grid(True, alpha=0.3)
-        if idx == 0:
-            ax.legend()
+            # Get IC from config
+            ic_val = config['experiment'].get('initial_condition', {}).get('value', 0.01)
+            
+            # 1. Ground Truth (only calculate once per col ideally, but cheap enough)
+            init_state, x_gt = run_spatial_intervention(torch.tensor([alpha, beta, gamma]), intervention, ic_val, T, L)
+            
+            # 2. Surrogate Prediction
+            n_mc = 20
+            predictions = []
+            
+            # y0 must match ic_val. y0 is [S, I, R]. R=0.
+            # I = ic_val. S = 1 - ic_val.
+            y0 = torch.tensor([1.0 - ic_val, ic_val, 0.0]).double()
+            
+            for _ in range(n_mc):
+                e_dists = generate_dists(instantiate_emission, omega, torch.tensor([alpha, beta, gamma]), model, y0, intervention, rnn_net)
+                traj = torch.stack([d.mean for d in e_dists]) / N 
+                predictions.append(traj.detach())
+                
+            predictions = torch.stack(predictions)
+            mean_pred = predictions.mean(dim=0)
+            std_pred = predictions.std(dim=0)
+            
+            # 3. Plot
+            for dim in range(3):
+                # GT
+                ax.plot(t_steps, x_gt[:, dim], '--', color=colors[dim], alpha=0.6)
+                # Surrogate
+                ax.plot(t_steps, mean_pred[:, dim], '-', color=colors[dim], label=f'{labels[dim]}' if (i==0 and j==0) else "")
+                # Uncertainty
+                lower = mean_pred[:, dim] - 2 * std_pred[:, dim]
+                upper = mean_pred[:, dim] + 2 * std_pred[:, dim]
+                ax.fill_between(t_steps, lower, upper, color=colors[dim], alpha=0.2)
+                
+            if i == 0:
+                ax.set_title(name)
+            if j == 0:
+                ax.set_ylabel(f"{family.upper()}\nFraction")
+            
+            ax.grid(True, alpha=0.3)
+            if i == 0 and j == 0:
+                ax.legend()
             
     # Add custom legend for line styles
     from matplotlib.lines import Line2D
     custom_lines = [Line2D([0], [0], color='black', linestyle='-'),
                     Line2D([0], [0], color='black', linestyle='--')]
-    fig.legend(custom_lines, ['Surrogate (Mean)', 'Ground Truth'], loc='upper center', bbox_to_anchor=(0.5, 0.95), ncol=2)
+    fig.legend(custom_lines, ['Surrogate (Mean)', 'Ground Truth'], loc='upper center', bbox_to_anchor=(0.5, 0.98), ncol=2)
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     save_path = os.path.abspath("experiments/trajectory_grid.png")
     plt.savefig(save_path)
     print(f"Trajectory grid saved to {save_path}")
@@ -128,37 +141,26 @@ def plot_trajectory_grid(omega, rnn_net, model, scenarios, config):
 def main():
     config = load_config()
     
-    # Define interesting scenarios
-    # Params: alpha (inf), beta (rec), gamma (resus)
-    # High: alpha=0.9, beta=0.1
-    # Med:  alpha=0.6, beta=0.2
-    # Low:  alpha=0.3, beta=0.3
-    # Interventions: None=0, Early=1, Late=4
+    # Define diverse parameters
+    # [alpha, beta, gamma]
+    p_outbreak = [0.9, 0.1, 0.0]  # Fast spread, no reinfection
+    p_suppress = [0.2, 0.5, 0.0]  # Low spread, moderate recovery
+    p_reinfect = [0.6, 0.1, 0.3]  # Moderate spread, high reinfection
     
-    p_high = [0.9, 0.1, 0.1]
-    p_med  = [0.6, 0.2, 0.1]
-    p_low  = [0.3, 0.3, 0.1]
-    
-    i_none = 0
-    i_early = 1
-    i_late = 4
+    i_none = 0 # No intervention
+    i_lock = 2 # Intervention ~ t=10
     
     scenarios = [
-        ("High Inf, No Int", p_high, i_none),
-        ("High Inf, Early",  p_high, i_early),
-        ("High Inf, Late",   p_high, i_late),
-        ("Med Inf, No Int",  p_med, i_none),
-        ("Med Inf, Early",   p_med, i_early),
-        ("Med Inf, Late",    p_med, i_late),
-        ("Low Inf, No Int",  p_low, i_none),
-        ("Low Inf, Early",   p_low, i_early),
-        ("Low Inf, Late",    p_low, i_late)
+        ("Outbreak (No Int)",    p_outbreak, i_none),
+        ("Outbreak (Lockdown)",  p_outbreak, i_lock),
+        ("Suppression (No Int)", p_suppress, i_none),
+        ("Reinfection (Lockdown)", p_reinfect, i_lock),
     ]
     
-    # Load Model
-    omega, rnn_net, model = load_surrogate("results_experiment_final", config)
+    # Rows: LODERNN, LODE, RNN
+    families = ["lodernn"]
     
-    plot_trajectory_grid(omega, rnn_net, model, scenarios, config)
+    plot_trajectory_grid(families, scenarios, "results_experiment_final", config)
 
 if __name__ == "__main__":
     main()

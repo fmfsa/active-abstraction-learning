@@ -27,6 +27,15 @@ class DropoutMLP(MLP):
         self._layers.append(nn.Linear(hidden_dims[-1], output_dim))
         
         self._final_nl = final_nonlinearity
+        
+        # Initialize weights
+        self._init_weights()
+        
+    def _init_weights(self):
+        # Initialize final layer with small weights to keep initial outputs reasonable
+        if isinstance(self._layers[-1], nn.Linear):
+            nn.init.normal_(self._layers[-1].weight, mean=0.0, std=0.1)
+            nn.init.constant_(self._layers[-1].bias, 0.0)
 
 class DropoutRNN(RNN):
     def __init__(self,
@@ -66,7 +75,9 @@ class DropoutRNN(RNN):
         else:
             out, _ = self._rnn(x, h)
             
-        return self._fff(out)
+        logits = self._fff(out)
+        # Clamp logits to prevent numerical instability
+        return torch.clamp(logits, min=-20.0, max=20.0)
 
 class MCDropoutWrapper(nn.Module):
     def __init__(self, model):

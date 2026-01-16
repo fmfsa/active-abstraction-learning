@@ -38,84 +38,63 @@ class AcquisitionManager:
 
     def _score_candidates(self, candidate_pool, model, n_samples):
         """
-        Computes a score for each candidate.
+        Computes an information gain score for each candidate in the pool.
+        
+        Supported Methods:
+        - random: (Handled in select_next_intervention)
+        - uncertainty_sampling: Variance of model predictions.
+        - bald: Mutual Information (Entropy of Expected - Expected Entropy).
+        - entropy: Entropy of Expected Predictions.
         """
-        model.eval() # Ensure eval mode logic is handled (MCDropoutWrapper forces train mode internally if needed)
-        
-        # We need to run the model multiple times
-        # candidate_pool is (P, D)
-        # We want outputs (P, n_samples, OutputDim)
-        
-        # Depending on how the model forward works, we might need a loop or batching
-        # The 'model' here is likely an Omega/RNN system.
-        # For simplicity, let's assume model(x) returns a distribution or point estimate.
-        # But wait, in ics4csm, the model takes (y0, params). 
-        # The 'candidate_pool' are the 'params'.
-        
-        # We need to interface with the specific way ics4csm models work.
-        # Omega takes (grids, parameters). Grids is often None for simple cases or handled internally.
-        # Actually, looking at `utils.py/generate_dists`:
-        # new_params = omega(None, params.unsqueeze(0).double())[0]
-        # So we can pass (None, candidates).
-        
-        scores = []
-        
-        # Doing this in a loop for now to avoid OOM if pool is large, 
-        # but ideal would be batch processing if Omega supports it.
-        # Omega seems to support batching: x = self.ffn(x).
+        model.eval() 
         
         with torch.no_grad():
-            # Get predictions for all samples
-            # Repetitive forward passes for MC Dropout
-            
-            # (P, D)
             candidates = candidate_pool.double() 
             
+            # 1. MC Sampling
             outputs_list = []
             for _ in range(n_samples):
-                # model here should refer to the 'omega' usually, 
-                # but the full surrogate involves omega -> ode -> rnn.
-                # Uncertainty comes from omega (if it has dropout) and rnn (if it has dropout).
-                # If we just want parameter uncertainty (Epistemic on structure), we care about Omega's output variance?
-                # OR the final predicted distribution entropy?
-                # AAL usually targets "Uncertainty in Causal Abstraction", so uncertainty in Omega's mapping is key.
-                # However, the user said "surrogate must output... distribution over distributions".
-                # So we should look at the final output `e_pars` (emission params) variance or entropy.
-                
-                # We need the full forward pass from params to e_pars.
-                # Let's assume 'model' passed here is a callable that takes params and returns e_pars (logits/probs).
-                # We will construct a helper for this in the loop.
-                
-                outs = model(candidates) # Expected shape (P, ...)
+                outs = model(candidates) # (P, OutputFeatures)
                 outputs_list.append(outs)
-                
-            # Stack: (n_samples, P, ...)
-            outputs = torch.stack(outputs_list)
             
-            # Calculate score based on method
+            # Stack: (n_samples, P, OutputFeatures)
+            outputs = torch.stack(outputs_list)
+            S, P, F = outputs.shape
+            
             if self.method == 'uncertainty_sampling':
-                # Variance of the mean prediction or Entropy
-                # Let's use Variance of the logits for now as a proxy for epistemic uncertainty
-                # outputs: (n_samples, P, OutputDim)
-                # Compute variance across samples
-                var = torch.var(outputs, dim=0).mean(dim=-1) # (P,) - mean over output dims
-                return var
+                # Variance of Mean Logits (Uncertainty in Model Parameters)
+                return torch.var(outputs, dim=0).mean(dim=-1)
                 
+            elif self.method == 'bald':
+                # BALD: H[y|x, D] - E_w[H[y|x, w]]
+                # Requires probabilistic output (Softmax)
+                if F % 3 == 0:
+                    outputs_reshaped = outputs.view(S, P, -1, 3)
+                    probs = torch.softmax(outputs_reshaped, dim=-1) # (S, P, T, 3)
+                    
+                    # A. Entropy of Expected Prediction
+                    mean_probs = torch.mean(probs, dim=0) # (P, T, 3)
+                    entropy_predictive = -torch.sum(mean_probs * torch.log(mean_probs + 1e-10), dim=-1).mean(dim=-1)
+                    
+                    # B. Expected Entropy of Predictions
+                    entropy_samples = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1) # (S, P, T)
+                    mean_entropy = torch.mean(entropy_samples, dim=0).mean(dim=-1)
+                    
+                    return entropy_predictive - mean_entropy
+                else:
+                    # Fallback to variance if output shape implies not classification
+                    return torch.var(outputs, dim=0).mean(dim=-1)
+
             elif self.method == 'entropy':
-                # Entropy of the expected predictive distribution
-                # If outputs are logits, convert to probs
-                # This is "Predictive Entropy"
-                # But for MC Dropout, we want "Mutual Information" usually (BALD), 
-                # or just simple Variance.
-                # Let's stick to simple variance of logits for 'uncertainty_sampling'
-                # and maybe add a specific 'bald' if needed.
+                if F % 3 == 0:
+                    outputs_reshaped = outputs.view(S, P, -1, 3)
+                    probs = torch.softmax(outputs_reshaped, dim=-1) 
+                    mean_probs = torch.mean(probs, dim=0)
+                    entropy_predictive = -torch.sum(mean_probs * torch.log(mean_probs + 1e-10), dim=-1).mean(dim=-1)
+                    return entropy_predictive
                 return torch.var(outputs, dim=0).mean(dim=-1)
                 
             elif self.method == 'disagreement':
-                # KL Divergence between committees
-                # Here we treat MC samples as committee members
-                # Compute pairwise KL or Variance (approximation)
-                # Variance is a good proxy for disagreement in regression-like outputs (logits).
                  return torch.var(outputs, dim=0).mean(dim=-1)
                  
         return torch.zeros(len(candidate_pool))
